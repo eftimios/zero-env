@@ -82,13 +82,15 @@ GRPO_CONFIG = {
         "distributed": "ddp",
         "gpu_count": 4,
         "batch_size": 2,
-        "gradient_accumulation_steps": 4,
+        "gradient_accumulation_steps": 2,
         "use_lora": True,
-        "vllm_gpu_memory_utilization": 0.35,
+        "vllm_gpu_memory_utilization": 0.40,
         "beta": 0.01,
-        "num_generations": 8,
-        "initial_max_turn": 3,
-        "rollouts_per_stage": 512,
+        "num_generations": 6,
+        "initial_max_turn": 2,
+        "rollouts_per_stage": 128,
+        "vllm_max_model_length": 4096,
+        "max_game_turn": 20,
     },
     "9_12_b": {
         "lr": 6e-6,
@@ -193,6 +195,7 @@ def get_run_cmd(config: dict, gpu_nums: int):
         "disable_fa",
         "disable_action_mask",
         "beta",
+        "vllm_max_model_length",
     ]
     for key in required_keys:
         if key not in config:
@@ -237,7 +240,7 @@ def get_run_cmd(config: dict, gpu_nums: int):
     --loss_type dr_grpo \
     --do_eval False \
     --num_iterations 2 \
-    --vllm_max_model_length 8192"""
+    --vllm_max_model_length {vllm_max_model_length}"""
     )
 
     if config.get("use_lora", False):
@@ -269,6 +272,8 @@ def get_run_cmd(config: dict, gpu_nums: int):
         template = template + f" --initial_max_turn {config.get('initial_max_turn', 3)}"
     if config.get("rollouts_per_stage", 640) != 640:
         template = template + f" --rollouts_per_stage {config.get('rollouts_per_stage', 640)}"
+    if config.get("max_game_turn", 20) != 20:
+        template = template + f" --max_game_turn {config.get('max_game_turn', 20)}"
     return template
 
 
@@ -306,6 +311,8 @@ def get_training_json(train_info: dict) -> dict:
         "num_generations": config.get("num_generations", 4),
         "initial_max_turn": config.get("initial_max_turn", 3),
         "rollouts_per_stage": config.get("rollouts_per_stage", 640),
+        "vllm_max_model_length": config.get("vllm_max_model_length", 8192),
+        "max_game_turn": config.get("max_game_turn", 20),
     }
 
     if model_name == "OpenAssistant/oasst-sft-4-pythia-12b-epoch-3.5":
@@ -314,11 +321,15 @@ def get_training_json(train_info: dict) -> dict:
     if "starcoder" in model_name.lower():
         run_config["batch_size"] = int(run_config["batch_size"] / 1.5)
 
+    hours = train_info.get("hours_to_complete", 4)
+    periodic_save_steps = 30 if hours <= 3.5 else 75
+    min_steps = 40 if hours <= 3.5 else 100
+
     train_request = deepcopy(train_info)
     train_request["save_before_remaining_time"] = 10
-    train_request["min_steps"] = 100
+    train_request["min_steps"] = min_steps
     train_request["adjust_batch_size"] = False
-    train_request["periodic_save_steps"] = 75
+    train_request["periodic_save_steps"] = periodic_save_steps
 
     total_batch_size = run_config["batch_size"] * run_config["gpu_nums"]
 
