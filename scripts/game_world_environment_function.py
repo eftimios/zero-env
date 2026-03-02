@@ -539,13 +539,13 @@ def rollout_last_prompt_and_completion_parallelized_curriculum(
         # Initialize curriculum scheduler
         rollout_last_prompt_and_completion_parallelized_curriculum.curriculum = CurriculumScheduler(
             initial_max_turn=trainer.args.initial_max_turn,
-            final_max_turn=45,  # Gin Rummy: games can go up to 30-50 turns
+            final_max_turn=trainer.args.max_game_turn,
             rollouts_per_stage=trainer.args.rollouts_per_stage,
             initial_hint_prob=0.45,  # Lower for complex game
             final_hint_prob=0.0,
             warmup_rollouts=trainer.args.rollouts_per_stage,
         )
-        print(f"[CURRICULUM] Initialized with initial_max_turn={trainer.args.initial_max_turn}, final_max_turn=50, rollouts_per_stage={trainer.args.rollouts_per_stage}, initial_hint_prob=0.50, final_hint_prob=0.0, warmup_rollouts={trainer.args.rollouts_per_stage}")
+        print(f"[CURRICULUM] Initialized with initial_max_turn={trainer.args.initial_max_turn}, final_max_turn={trainer.args.max_game_turn}, rollouts_per_stage={trainer.args.rollouts_per_stage}, initial_hint_prob=0.45, final_hint_prob=0.0, warmup_rollouts={trainer.args.rollouts_per_stage}")
 
     # Retrieve static variables
     rank = rollout_last_prompt_and_completion_parallelized_curriculum.rank
@@ -827,23 +827,23 @@ def rollout_full_prompt_and_completion_parallelized_curriculum(
         # Initialize turn curriculum scheduler
         rollout_full_prompt_and_completion_parallelized_curriculum.curriculum = CurriculumScheduler(
             initial_max_turn=trainer.args.initial_max_turn,
-            final_max_turn=45,
+            final_max_turn=trainer.args.max_game_turn,
             rollouts_per_stage=trainer.args.rollouts_per_stage,
             initial_hint_prob=0.45,
             final_hint_prob=0.0,
             warmup_rollouts=trainer.args.rollouts_per_stage,
         )
-        print(f"[CURRICULUM] Initialized with initial_max_turn={trainer.args.initial_max_turn}, final_max_turn=45, rollouts_per_stage={trainer.args.rollouts_per_stage}")
+        print(f"[CURRICULUM] Initialized with initial_max_turn={trainer.args.initial_max_turn}, final_max_turn={trainer.args.max_game_turn}, rollouts_per_stage={trainer.args.rollouts_per_stage}")
 
         # Initialize opponent strength curriculum scheduler
         rollout_full_prompt_and_completion_parallelized_curriculum.opponent_curriculum = OpponentCurriculumScheduler(
             initial_simulations=5,
-            final_simulations=100,
+            final_simulations=50,
             initial_rollouts=1,
-            final_rollouts=3,
+            final_rollouts=2,
             rollouts_per_stage=trainer.args.rollouts_per_stage,
-            num_stages=20,
-            warmup_rollouts=256,
+            num_stages=10,
+            warmup_rollouts=64,
         )
         print(f"[OPP-CURRICULUM] Initialized: simulations 5→100 over {trainer.args.rollouts_per_stage * 20} rollouts")
 

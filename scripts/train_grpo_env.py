@@ -64,6 +64,7 @@ class TrainingArguments(GRPOConfig):
     disable_action_mask: Optional[bool] = field(default=False)
     initial_max_turn: Optional[int] = field(default=2)
     rollouts_per_stage: Optional[int] = field(default=640)
+    max_game_turn: Optional[int] = field(default=20)
 
 def print_trainable_parameters(model):
     """
