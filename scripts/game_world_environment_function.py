@@ -1,3 +1,4 @@
+import math
 import os
 import re
 import random
@@ -226,6 +227,81 @@ class CurriculumScheduler:
         }
 
 
+class OpponentCurriculumScheduler:
+    """
+    Gradually increases MCTS opponent strength during training.
+
+    Starts with a weak opponent so the model receives positive reward signals
+    early and can learn basic legal moves. Progressively strengthens the
+    opponent using logarithmic scaling — fast improvement at the start,
+    slower near the ceiling — so the model must develop genuine strategy to win.
+
+    Stages:
+      warmup  → initial_simulations (easy wins, bootstrap basic play)
+      mid     → log-scaled ramp from initial to final
+      end     → final_simulations (strong opponent, evaluates real skill)
+    """
+
+    def __init__(
+        self,
+        initial_simulations: int = 5,
+        final_simulations: int = 100,
+        initial_rollouts: int = 1,
+        final_rollouts: int = 3,
+        rollouts_per_stage: int = 640,
+        num_stages: int = 20,
+        warmup_rollouts: int = 256,
+    ):
+        self.initial_simulations = initial_simulations
+        self.final_simulations = final_simulations
+        self.initial_rollouts = initial_rollouts
+        self.final_rollouts = final_rollouts
+        self.rollouts_per_stage = rollouts_per_stage
+        self.num_stages = num_stages
+        self.warmup_rollouts = warmup_rollouts
+        self.total_rollouts = 0
+
+    def get_mcts_params(self) -> tuple[int, int]:
+        """Returns (mcts_max_simulations, mcts_num_rollouts) for the current stage."""
+        if self.total_rollouts < self.warmup_rollouts:
+            return self.initial_simulations, self.initial_rollouts
+
+        adjusted = self.total_rollouts - self.warmup_rollouts
+        stage = min(adjusted // self.rollouts_per_stage, self.num_stages - 1)
+        progress = stage / max(self.num_stages - 1, 1)
+
+        # Logarithmic scaling: rapid early gains, slower near ceiling
+        log_progress = math.log1p(progress * (math.e - 1))
+        sims = int(
+            self.initial_simulations
+            + log_progress * (self.final_simulations - self.initial_simulations)
+        )
+        rollouts = self.final_rollouts if progress >= 0.5 else self.initial_rollouts
+        return sims, rollouts
+
+    def step(self, n: int = 1):
+        self.total_rollouts += n
+
+    def get_status(self) -> dict:
+        sims, rollouts = self.get_mcts_params()
+        return {
+            "total_rollouts": self.total_rollouts,
+            "mcts_simulations": sims,
+            "mcts_rollouts": rollouts,
+        }
+
+
+def extract_deadwood(obs_text: str) -> int | None:
+    """
+    Parse the player's current deadwood value from a Gin Rummy observation.
+    Returns None if the observation doesn't contain deadwood info (e.g. mid-draw phase).
+    """
+    match = re.search(r'[Dd]eadwood[:\s]+(\d+)', obs_text)
+    if match:
+        return int(match.group(1))
+    return None
+
+
 def rollout_first_prompt_and_completion(prompts: list[str], trainer, max_turns: int = 30) -> dict[str, list]:
     from trl.experimental.openenv import generate_rollout_completions
     import os
@@ -305,7 +381,7 @@ def rollout_first_prompt_and_completion(prompts: list[str], trainer, max_turns: 
         turn_number = 0
         
         # --- Reset Environment (POST /reset) ---
-        payload = {"task_id": game_id, "seed": random.randint(1, 999999), "opponent": "mcts", "mcts_max_simulations": 50, "mcts_num_rollouts": 2}
+        payload = {"task_id": game_id, "seed": 42, "opponent": "mcts", "mcts_max_simulations": 25, "mcts_num_rollouts": 1}
         
         try:
             reset_res = requests.post(f"{env_endpoint}/reset", json=payload, timeout=TIMEOUT)
@@ -503,7 +579,8 @@ def rollout_last_prompt_and_completion_parallelized_curriculum(
         use_hints = random.random() < current_hint_prob
 
         # --- Reset Environment (POST /reset) ---
-        payload = {"task_id": game_id, "seed": random.randint(1, 999999), "opponent": "mcts", "mcts_max_simulations": 50, "mcts_num_rollouts": 2}
+        opp_sims, opp_rollouts = opponent_curriculum.get_mcts_params()
+        payload = {"task_id": game_id, "seed": random.randint(1, 999999), "opponent": "mcts", "mcts_max_simulations": opp_sims, "mcts_num_rollouts": opp_rollouts}
 
         try:
             reset_res = requests.post(f"{env_endpoint}/reset", json=payload, timeout=TIMEOUT)
@@ -747,7 +824,7 @@ def rollout_full_prompt_and_completion_parallelized_curriculum(
         rollout_full_prompt_and_completion_parallelized_curriculum.games_to_task_id_range = games_to_task_id_range
         rollout_full_prompt_and_completion_parallelized_curriculum.selected_game = selected_game
         
-        # Initialize curriculum scheduler
+        # Initialize turn curriculum scheduler
         rollout_full_prompt_and_completion_parallelized_curriculum.curriculum = CurriculumScheduler(
             initial_max_turn=trainer.args.initial_max_turn,
             final_max_turn=45,
@@ -756,7 +833,19 @@ def rollout_full_prompt_and_completion_parallelized_curriculum(
             final_hint_prob=0.0,
             warmup_rollouts=trainer.args.rollouts_per_stage,
         )
-        print(f"[CURRICULUM] Initialized with initial_max_turn={trainer.args.initial_max_turn}, final_max_turn=50, rollouts_per_stage={trainer.args.rollouts_per_stage}, initial_hint_prob=0.50, final_hint_prob=0.0, warmup_rollouts={trainer.args.rollouts_per_stage}")
+        print(f"[CURRICULUM] Initialized with initial_max_turn={trainer.args.initial_max_turn}, final_max_turn=45, rollouts_per_stage={trainer.args.rollouts_per_stage}")
+
+        # Initialize opponent strength curriculum scheduler
+        rollout_full_prompt_and_completion_parallelized_curriculum.opponent_curriculum = OpponentCurriculumScheduler(
+            initial_simulations=5,
+            final_simulations=100,
+            initial_rollouts=1,
+            final_rollouts=3,
+            rollouts_per_stage=trainer.args.rollouts_per_stage,
+            num_stages=20,
+            warmup_rollouts=256,
+        )
+        print(f"[OPP-CURRICULUM] Initialized: simulations 5→100 over {trainer.args.rollouts_per_stage * 20} rollouts")
 
     # Retrieve static variables
     rank = rollout_full_prompt_and_completion_parallelized_curriculum.rank
@@ -765,15 +854,17 @@ def rollout_full_prompt_and_completion_parallelized_curriculum(
     games_to_task_id_range = rollout_full_prompt_and_completion_parallelized_curriculum.games_to_task_id_range
     selected_game = rollout_full_prompt_and_completion_parallelized_curriculum.selected_game
     curriculum = rollout_full_prompt_and_completion_parallelized_curriculum.curriculum
-    
+    opponent_curriculum = rollout_full_prompt_and_completion_parallelized_curriculum.opponent_curriculum
+
     tokenizer = trainer.processing_class
     TIMEOUT = 2400
-    
+
     # Get current curriculum parameters
     total_rollouts = curriculum.total_rollouts
     current_max_turn = curriculum.get_max_turn()
     current_hint_prob = curriculum.get_hint_prob()
-    print(f"[CURRICULUM] Rollout {total_rollouts}: max_turn={current_max_turn}, hint_prob={current_hint_prob:.2f}")
+    opp_status = opponent_curriculum.get_status()
+    print(f"[CURRICULUM] Rollout {total_rollouts}: max_turn={current_max_turn}, hint_prob={current_hint_prob:.2f} | opp_sims={opp_status['mcts_simulations']}")
 
     def run_single_prompt(index: int, prompt: str):
         game_id = random.randint(games_to_task_id_range[selected_game][0], games_to_task_id_range[selected_game][1])
@@ -802,7 +893,8 @@ def rollout_full_prompt_and_completion_parallelized_curriculum(
         use_hints = random.random() < current_hint_prob
 
         # --- Reset Environment (POST /reset) ---
-        payload = {"task_id": game_id, "seed": random.randint(1, 999999), "opponent": "mcts", "mcts_max_simulations": 50, "mcts_num_rollouts": 2}
+        opp_sims, opp_rollouts = opponent_curriculum.get_mcts_params()
+        payload = {"task_id": game_id, "seed": random.randint(1, 999999), "opponent": "mcts", "mcts_max_simulations": opp_sims, "mcts_num_rollouts": opp_rollouts}
 
         try:
             reset_res = requests.post(f"{env_endpoint}/reset", json=payload, timeout=TIMEOUT)
@@ -831,6 +923,7 @@ def rollout_full_prompt_and_completion_parallelized_curriculum(
             system_prompt += suggestion_prompt
 
         messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": formatted_observation}]
+        prev_deadwood: int | None = extract_deadwood(formatted_observation)
 
         # --- Interaction Loop ---
         while not done and (turn_number < current_max_turn):
@@ -912,12 +1005,17 @@ def rollout_full_prompt_and_completion_parallelized_curriculum(
                 done = False
                 invalid_count += 1
 
-            # Check for invalid actions in observation — reward valid actions with small dense signal
+            # Dense reward: valid action bonus + deadwood reduction shaping
             if "Nothing happens" in formatted_observation or "Invalid" in formatted_observation:
                 invalid_count += 1
                 step_rewards.append(0.0)
             else:
-                step_rewards.append(0.05)
+                curr_deadwood = extract_deadwood(formatted_observation)
+                deadwood_bonus = 0.0
+                if prev_deadwood is not None and curr_deadwood is not None:
+                    deadwood_bonus = max(0.0, (prev_deadwood - curr_deadwood) * 0.02)
+                prev_deadwood = curr_deadwood
+                step_rewards.append(0.05 + deadwood_bonus)
 
             if done:
                 train_reward = step_reward
@@ -985,8 +1083,12 @@ def rollout_full_prompt_and_completion_parallelized_curriculum(
                 "final_score": 0.0,
             }
             
-    # Update curriculum after batch
+    # Update both curricula after batch
     curriculum.step(len(prompts))
+    opponent_curriculum.step(len(prompts))
+
+    opp_sims, opp_rollouts = opponent_curriculum.get_mcts_params()
+    print(f"[OPP-CURRICULUM] mcts_simulations={opp_sims}, mcts_rollouts={opp_rollouts}")
 
     list_results = [r for r in results if r is not None]
     
